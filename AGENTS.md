@@ -116,6 +116,52 @@ Signed-off-by: Your Name <your.email@example.com>
 
 ---
 
+## 3. Code Style
+
+### Files & headers
+
+Every Python file must start with the SPDX header:
+```python
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+```
+
+### Imports
+
+- Use isort grouping: stdlib → third-party → `vllm` (enforced by ruff rule `I`).
+- Use `from X import Y` for vllm internal modules (e.g. `from vllm.logger import init_logger`).
+- Use `import vllm.envs as envs` when you need the module object.
+- Avoid `import *`.
+- Use `TYPE_CHECKING` blocks for type-only imports to avoid circular dependencies.
+
+### Types & naming
+
+- All public functions/methods must have type annotations.
+- Use `X | None` (Python 3.10+ union syntax), not `Optional[X]`.
+- Use `collections.abc` types (`Callable`, `Sequence`, `Mapping`) over `typing` aliases.
+- Prefer `TypeVar` from `typing_extensions`.
+- Use `logger = init_logger(__name__)` for module-level loggers.
+- Private helpers: prefix with `_`.
+
+### Formatting & linting
+
+- **Ruff** enforces pycodestyle (E), pyflakes (F), pyupgrade (UP), flake8-bugbear (B), isort (I), flake8-logging-format (G), flake8-simplify (SIM), flake8-implicit-str-concat (ISC).
+- Ignored: `F403`/`F405` (star imports), `E731` (lambda assignment), `B905` (zip strict), `UP032` (f-string).
+- Run `pre-commit run --all-files` before committing.
+
+### Forbidden patterns
+
+- **Do not call `torch.cuda.*` APIs directly.** Use vLLM's platform abstractions instead. Enforced by a pre-commit hook (`check-torch-cuda-call`).
+- Filenames must not contain spaces (enforced by hook).
+- No mutable default arguments; use `field(default_factory=...)` or `msgspec.field(default_factory=...)`.
+
+### Error handling
+
+- Use custom exceptions from `vllm.exceptions` (e.g. `VLLMValidationError`).
+- Validate user-facing config with pydantic dataclasses; raise on invalid input rather than silently falling back.
+
+---
+
 ## Domain-Specific Guides
 
 Do not modify code in these areas without first reading and following the
