@@ -11,7 +11,13 @@
 
 ## 2. 核心组件分析
 
-### 2.1 引擎客户端构建
+### 2.1 全局变量和常量
+
+- **`prometheus_multiproc_dir`** (行 69): Prometheus 多进程临时目录，用于多进程指标收集
+- **`_FALLBACK_SUPPORTED_TASKS`** (行 74): 默认支持的任务类型 `("generate",)`，用于向后兼容
+- **`logger`** (行 72): 模块日志记录器，使用特殊名称以避免 GitHub PR #4765 的问题
+
+### 2.2 引擎客户端构建
 
 #### `build_async_engine_client()` (行 78-105)
 - **功能**: 创建异步引擎客户端的上下文管理器
@@ -20,7 +26,7 @@
   - 使用 `AsyncEngineArgs.from_cli_args()` 从命令行参数构建引擎参数
   - 支持多进程客户端配置（`client_count` 和 `client_index`）
 
-#### `build_async_engine_client_from_engine_args()` (行 108-155)
+#### `build_async_engine_client_from_engine_args()` (行 109-155)
 - **功能**: 根据引擎参数创建异步引擎客户端
 - **关键逻辑**:
   - 使用 `AsyncLLM.from_vllm_config()` 创建异步 LLM 实例
@@ -28,10 +34,14 @@
   - 自动清理多模态缓存（`reset_mm_cache()`）
   - 确保在上下文退出时正确关闭引擎
 
-### 2.2 FastAPI 应用构建
+### 2.3 FastAPI 应用构建
 
 #### `build_app()` (行 157-308)
 - **功能**: 构建并配置 FastAPI 应用
+- **FastAPI 配置**:
+  - 根据 `args.disable_fastapi_docs` 和 `args.enable_offline_docs` 配置 API 文档
+  - 使用 `lifespan` 上下文管理器（从 `server_utils` 导入）管理应用生命周期
+  - 设置 `app.root_path` 为命令行指定的根路径
 - **支持的任务类型**:
   - `generate`: 文本生成
   - `transcription`: 语音转文本
@@ -44,22 +54,33 @@
 2. Models API 路由
 3. Sagemaker API 路由
 4. 任务特定路由：
-   - Generate 路由 + Disagg、RLHF、Elastic EP 路由
-   - Render 路由
-   - Speech-to-Text 路由
-   - Realtime 路由
-   - Pooling 路由
+   - Generate 路由 + Disagg、RLHF、Elastic EP 路由（仅 generate 任务）
+   - Render 路由（generate 或 render 任务）
+   - Speech-to-Text 路由（仅 transcription 任务）
+   - Realtime 路由（仅 realtime 任务）
+   - Pooling 路由（池化任务）
 
 **中间件配置**:
 1. CORS 中间件（跨域资源共享）
-2. 异常处理器（HTTPException、RequestValidationError、EngineGenerateError、EngineDeadError、GenerationError）
-3. 认证中间件（如果设置了 API Key）
-4. 请求 ID 中间件（如果启用）
-5. 扩展中间件（ScalingMiddleware）
-6. WebSocket 指标中间件（仅 realtime 任务）
+2. 认证中间件（如果设置了 API Key）
+3. 请求 ID 中间件（如果启用）
+4. 弹性扩展中间件（ScalingMiddleware）
+5. WebSocket 指标中间件（仅 realtime 任务）
+6. 响应日志中间件（如果设置 `VLLM_DEBUG_LOG_API_SERVER_RESPONSE` 环境变量）
 7. 自定义中间件（通过命令行参数指定）
 
-### 2.3 应用状态初始化
+**其他配置**:
+- `sagemaker_standards_bootstrap()`: SageMaker 标准引导函数，在应用返回前调用
+
+**异常处理器配置**:
+1. `HTTPException` - HTTP 错误处理
+2. `RequestValidationError` - 请求验证错误处理
+3. `EngineGenerateError` - 引擎生成错误处理
+4. `EngineDeadError` - 引擎死亡错误处理
+5. `GenerationError` - 生成错误处理
+6. `Exception` - 通用异常兜底处理
+
+### 2.4 应用状态初始化
 
 #### `init_app_state()` (行 311-418)
 - **功能**: 初始化 FastAPI 应用状态
@@ -69,27 +90,47 @@
   - `openai_serving_render`: OpenAI 渲染服务（处理聊天模板、工具调用等）
   - `openai_serving_tokenization`: OpenAI 分词服务
   - 任务特定状态初始化（generate、transcription、realtime、pooling）
+- **关键逻辑**:
+  - 处理 `default_mm_loras`（多模态 LoRA）并合并到 `lora_modules`
+  - 初始化静态 LoRA 模块（`init_static_loras()`）
+  - 支持 `served_model_name` 参数，否则使用 `model` 作为默认名称
 
 #### `init_render_app_state()` (行 420-485)
 - **功能**: 为 CPU-only 渲染服务器初始化应用状态
 - **特点**: 不需要引擎客户端，直接从 VllmConfig 构建预处理管道
 
-### 2.4 服务器设置
+### 2.5 服务器设置
+
+#### `validate_api_server_args()` (行 507-522)
+- **功能**: 验证 API 服务器参数的有效性
+- **验证内容**:
+  - 工具调用解析器（tool_call_parser）是否已注册
+  - 推理解析器（reasoning_parser）是否已注册
+
+#### `create_server_socket()` (行 488-498)
+- **功能**: 创建 TCP 服务器套接字
+- **特点**: 支持 IPv4 和 IPv6，设置 SO_REUSEADDR 和 SO_REUSEPORT 选项
+
+#### `create_server_unix_socket()` (行 501-504)
+- **功能**: 创建 Unix 域套接字
+- **特点**: 用于进程间通信，支持 UDS（Unix Domain Socket）
 
 #### `setup_server()` (行 526-567)
 - **功能**: 验证参数、设置信号处理器、创建服务器套接字
+- **装饰器**: 使用 `@instrument(span_name="API server setup")` 进行追踪
 - **关键操作**:
   - 记录版本和模型信息
   - 导入工具解析器和推理解析器插件
-  - 验证参数有效性
-  - 创建服务器套接字（支持 IPv4、IPv6 和 Unix 域套接字）
+  - 调用 `validate_api_server_args()` 验证参数有效性
+  - 调用 `create_server_socket()` 或 `create_server_unix_socket()` 创建服务器套接字
   - 设置文件描述符限制（`set_ulimit()`）
   - 注册 SIGTERM 信号处理器
 
-### 2.5 服务器启动
+### 2.6 服务器启动
 
 #### `build_and_serve()` (行 570-615)
 - **功能**: 构建应用、初始化状态并启动 HTTP 服务
+- **返回值**: `asyncio.Task` - 服务器关闭任务，供调用者等待
 - **流程**:
   1. 获取 uvicorn 日志配置
   2. 获取支持的任务类型
@@ -97,10 +138,15 @@
   4. 初始化应用状态
   5. 启动 uvicorn HTTP 服务器
 
+#### `build_and_serve_renderer()` (行 618-660)
+- **功能**: 为 CPU-only 渲染服务器构建应用并启动服务
+- **返回值**: `asyncio.Task` - 服务器关闭任务，供调用者等待
+- **特点**: 不需要引擎客户端，直接使用 VllmConfig 初始化渲染管道
+
 #### `run_server()` (行 663-671)
 - **功能**: 运行单 worker API 服务器
 - **流程**:
-  1. 设置进程特定日志前缀
+  1. 调用 `decorate_logs("APIServer")` 设置进程特定日志前缀
   2. 调用 `setup_server()` 设置服务器
   3. 调用 `run_server_worker()` 运行服务器
 
@@ -137,7 +183,12 @@
 - `vllm.v1.engine.async_llm.AsyncLLM`: 异步 LLM 实现
 - `vllm.entrypoints.launcher.serve_http`: HTTP 服务器启动器
 - `vllm.entrypoints.openai.cli_args`: 命令行参数定义
-- `vllm.entrypoints.openai.server_utils`: 服务器工具函数
+- `vllm.entrypoints.openai.server_utils`: 服务器工具函数（含 `lifespan`、异常处理器等）
+- `vllm.entrypoints.sagemaker.api_router`: SageMaker API 路由
+- `vllm.entrypoints.serve.elastic_ep.middleware`: 弹性扩展中间件
+- `vllm.tracing.instrument`: 追踪装饰器
+- `vllm.tool_parsers.ToolParserManager`: 工具解析器管理器
+- `vllm.reasoning.ReasoningParserManager`: 推理解析器管理器
 
 ## 5. 架构特点
 
@@ -185,6 +236,7 @@
 - **EngineGenerateError**: 引擎生成错误
 - **EngineDeadError**: 引擎死亡错误
 - **GenerationError**: 生成错误
+- **Exception**: 通用异常（兜底处理）
 
 ### 7.2 错误处理策略
 - **统一处理**: 所有异常通过统一的异常处理器处理
@@ -193,8 +245,12 @@
 
 ## 8. 使用示例
 
-### 8.1 基本启动
+### 8.1 基本启动（推荐方式）
 ```bash
+# 使用 vllm serve 命令（推荐）
+vllm serve facebook/opt-125m --host 0.0.0.0 --port 8000
+
+# 或者直接调用模块
 python -m vllm.entrypoints.openai.api_server \
   --model facebook/opt-125m \
   --host 0.0.0.0 \
@@ -203,8 +259,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 ### 8.2 带 SSL 的启动
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model facebook/opt-125m \
+vllm serve facebook/opt-125m \
   --host 0.0.0.0 \
   --port 443 \
   --ssl-keyfile /path/to/key.pem \
@@ -213,11 +268,19 @@ python -m vllm.entrypoints.openai.api_server \
 
 ### 8.3 带 API Key 的启动
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model facebook/opt-125m \
+vllm serve facebook/opt-125m \
   --host 0.0.0.0 \
   --port 8000 \
   --api-key your-secret-key
+```
+
+### 8.4 带 LoRA 适配器的启动
+```bash
+vllm serve facebook/opt-125m \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --enable-lora \
+  --lora-modules my_lora=/path/to/lora
 ```
 
 ## 9. 总结
